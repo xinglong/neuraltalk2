@@ -66,7 +66,7 @@ end
   The data is iterated linearly in order
 --]]
 function DataLoaderRaw:getBatch(opt)
-  local batch_size = utils.getopt(opt, 'batch_size', 5) -- how many images get returned at one time (to go through CNN)
+  local batch_size = utils.getopt(opt, 'batch_size', 1) -- how many images get returned at one time (to go through CNN)
   -- pick an index of the datapoint to load next
   local img_batch_raw = torch.ByteTensor(batch_size, 3, 256, 256)
   local max_index = self.N
@@ -79,14 +79,19 @@ function DataLoaderRaw:getBatch(opt)
     self.iterator = ri_next
 
     -- load the image
-    local img = image.load(self.files[ri], 3, 'byte')
-    img_batch_raw[i] = image.scale(img, 256, 256)
-
-    -- and record associated info as well
-    local info_struct = {}
-    info_struct.id = self.ids[ri]
-    info_struct.file_path = self.files[ri]
-    table.insert(infos, info_struct)
+    image_file = self.files[ri]
+    local ok, img = pcall(image.load, image_file, 3, 'byte')
+    --local img = image.load(image_file, 3, 'byte')
+    if ok then
+        img_batch_raw[i] = image.scale(img, 256, 256)
+        -- and record associated info as well
+        local info_struct = {}
+        info_struct.id = self.ids[ri]
+        info_struct.file_path = self.files[ri]
+        table.insert(infos, info_struct)
+    else
+        print('image loading error: ' .. img, image_file)
+    end
   end
 
   local data = {}

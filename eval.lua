@@ -44,7 +44,7 @@ cmd:option('-coco_json', '', 'if nonempty then use this file in DataLoaderRaw (s
 cmd:option('-backend', 'cudnn', 'nn|cudnn')
 cmd:option('-id', 'evalscript', 'an id identifying this run/job. used only if language_eval = 1 for appending to intermediate files')
 cmd:option('-seed', 123, 'random number generator seed to use')
-cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
+cmd:option('-gpuid', -1, 'which gpu to use. -1 = use CPU')
 cmd:text()
 
 -------------------------------------------------------------------------------
@@ -114,52 +114,55 @@ local function eval_split(split, evalopt)
 
     -- fetch a batch of data
     local data = loader:getBatch{batch_size = opt.batch_size, split = split, seq_per_img = opt.seq_per_img}
-    data.images = net_utils.prepro(data.images, false, opt.gpuid >= 0) -- preprocess in place, and don't augment
-    n = n + data.images:size(1)
+    -- print('data[info]: ', data['infos'], not (next(data['infos']) == nil))
+    if not (next(data['infos']) == nil) then
+        data.images = net_utils.prepro(data.images, false, opt.gpuid >= 0) -- preprocess in place, and don't augment
+        n = n + data.images:size(1)
 
-    -- forward the model to get loss
-    local feats = protos.cnn:forward(data.images)
+        -- forward the model to get loss
+        local feats = protos.cnn:forward(data.images)
 
-    -- evaluate loss if we have the labels
-    local loss = 0
-    if data.labels then
-      local expanded_feats = protos.expander:forward(feats)
-      local logprobs = protos.lm:forward{expanded_feats, data.labels}
-      loss = protos.crit:forward(logprobs, data.labels)
-      loss_sum = loss_sum + loss
-      loss_evals = loss_evals + 1
+        -- evaluate loss if we have the labels
+        local loss = 0
+        if data.labels then
+          local expanded_feats = protos.expander:forward(feats)
+          local logprobs = protos.lm:forward{expanded_feats, data.labels}
+          loss = protos.crit:forward(logprobs, data.labels)
+          loss_sum = loss_sum + loss
+          loss_evals = loss_evals + 1
+        end
+
+        -- forward the model to also get generated samples for each image
+        local sample_opts = { sample_max = opt.sample_max, beam_size = opt.beam_size, temperature = opt.temperature }
+        local seq = protos.lm:sample(feats, sample_opts)
+        local sents = net_utils.decode_sequence(vocab, seq)
+        for k=1,#sents do
+          local entry = {image_id = data.infos[k].id, caption = sents[k]}
+          if opt.dump_path == 1 then
+            entry.file_name = data.infos[k].file_path
+          end
+          table.insert(predictions, entry)
+          if opt.dump_images == 1 then
+            -- dump the raw image to vis/ folder
+            local cmd = 'cp "' .. path.join(opt.image_root, data.infos[k].file_path) .. '" vis/imgs/img' .. #predictions .. '.jpg' -- bit gross
+            print(cmd)
+            os.execute(cmd) -- dont think there is cleaner way in Lua
+          end
+          if verbose then
+            print(string.format('image %s: %s', entry.image_id, entry.caption))
+          end
+        end
+
+        -- if we wrapped around the split or used up val imgs budget then bail
+        local ix0 = data.bounds.it_pos_now
+        local ix1 = math.min(data.bounds.it_max, num_images)
+        if verbose then
+          print(string.format('evaluating performance... %d/%d (%f)', ix0-1, ix1, loss))
+        end
+
+        if data.bounds.wrapped then break end -- the split ran out of data, lets break out
+        if num_images >= 0 and n >= num_images then break end -- we've used enough images
     end
-
-    -- forward the model to also get generated samples for each image
-    local sample_opts = { sample_max = opt.sample_max, beam_size = opt.beam_size, temperature = opt.temperature }
-    local seq = protos.lm:sample(feats, sample_opts)
-    local sents = net_utils.decode_sequence(vocab, seq)
-    for k=1,#sents do
-      local entry = {image_id = data.infos[k].id, caption = sents[k]}
-      if opt.dump_path == 1 then
-        entry.file_name = data.infos[k].file_path
-      end
-      table.insert(predictions, entry)
-      if opt.dump_images == 1 then
-        -- dump the raw image to vis/ folder
-        local cmd = 'cp "' .. path.join(opt.image_root, data.infos[k].file_path) .. '" vis/imgs/img' .. #predictions .. '.jpg' -- bit gross
-        print(cmd)
-        os.execute(cmd) -- dont think there is cleaner way in Lua
-      end
-      if verbose then
-        print(string.format('image %s: %s', entry.image_id, entry.caption))
-      end
-    end
-
-    -- if we wrapped around the split or used up val imgs budget then bail
-    local ix0 = data.bounds.it_pos_now
-    local ix1 = math.min(data.bounds.it_max, num_images)
-    if verbose then
-      print(string.format('evaluating performance... %d/%d (%f)', ix0-1, ix1, loss))
-    end
-
-    if data.bounds.wrapped then break end -- the split ran out of data, lets break out
-    if num_images >= 0 and n >= num_images then break end -- we've used enough images
   end
 
   local lang_stats
